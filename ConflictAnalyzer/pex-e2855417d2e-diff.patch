@@ -1,0 +1,2046 @@
+diff --git a/build.sh b/build.sh
+index dd96967..39c3dbb 100755
+--- a/build.sh
++++ b/build.sh
+@@ -8,13 +8,17 @@ function build
+     echo "NOTE: specify your own LLVM_DIR and LLVM_ROOT"
+     JOBS=`getconf _NPROCESSORS_ONLN`
+ #specify non default compiler here
+-#        -DCMAKE_C_COMPILER=clang-10  \
+-#        -DCMAKE_CXX_COMPILER=clang++-10
++        #-DCMAKE_C_COMPILER=clang  \
++        #-DCMAKE_CXX_COMPILER=clang++
+     mkdir build
+     pushd build
+     cmake ../ \
+-        -DLLVM_CMAKE_PATH=/usr/lib/llvm-11/lib/cmake \
++	    -DLLVM_DIR=/home/share/syz/new-llvm/llvm-project-12.0.1 \
++	    -DLLVM_ROOT=/home/share/syz/new-llvm/llvm-project-12.0.1 \
++        -DLLVM_CMAKE_PATH=/home/share/syz/new-llvm/llvm-project-12.0.1/build/lib/cmake \
+         -DCMAKE_BUILD_TYPE=Debug \
++        -DCMAKE_C_COMPILER=clang  \
++        -DCMAKE_CXX_COMPILER=clang++
+ 
+     make -j${JOBS}
+     popd
+diff --git a/gatlin/commontypes.h b/gatlin/commontypes.h
+index f0036eb..c44b22e 100644
+--- a/gatlin/commontypes.h
++++ b/gatlin/commontypes.h
+@@ -60,6 +60,14 @@ typedef std::unordered_map<Instruction *, FunctionSet *> Inst2Func;
+ typedef std::unordered_map<const Instruction *, FunctionSet *> ConstInst2Func;
+ typedef std::unordered_map<std::string, int> Str2Int;
+ 
++//mjzadd
++typedef std::unordered_map<Function*, CallInstList*> Func2CapCheckFuncs;
++typedef std::unordered_set<GlobalVariable*> GlobalVariableSet;
++typedef std::unordered_map<std::string,int> ModuleInterfaceName2Position;
++typedef std::set<std::string> InterestingModuleInterfacesName;
++typedef std::unordered_map<std::string,std::string> ModuleName2PathName;
++typedef unsigned u32_t;
++
+ // dynamic KMI
+ // pair between indices and function set(fptr stored into this position)
+ typedef std::pair<Indices *, FunctionSet *> IFPair;
+diff --git a/gatlin/gating_function.cpp b/gatlin/gating_function.cpp
+index c281ed0..c0a4a68 100644
+--- a/gatlin/gating_function.cpp
++++ b/gatlin/gating_function.cpp
+@@ -15,6 +15,8 @@
+ 
+ #include <fstream>
+ 
++
++
+ void GatingFunctionBase::dump_interesting(InstructionSet *cis) {
+   for (auto *ci : *cis) {
+     CallInst *cs = dyn_cast<CallInst>(ci);
+@@ -30,6 +32,13 @@ void GatingFunctionBase::dump_interesting(InstructionSet *cis) {
+ ////////////////////////////////////////////////////////////////////////////////
+ // GatingCap
+ 
++
++//mjzadd
++int GatingCap::getposfromfunc(Function* f)
++{
++    return chk_func_cap_position[f];
++}
++
+ void GatingCap::load_cap_func_list(std::string &file) {
+   std::ifstream input(file);
+   if (!input.is_open()) {
+@@ -105,6 +114,8 @@ GatingCap::GatingCap(Module &module, std::string &capfile)
+         CallInst *ci = dyn_cast<CallInst>(ii);
+         if (!ci)
+           continue;
++        // errs()<<"mjzadd: ci is  "<<*ci<<"\n";
++        
+         // we are expecting a direct call
+         Function *child = get_callee_function_direct(ci);
+         if (!child)
+@@ -114,19 +125,28 @@ GatingCap::GatingCap(Module &module, std::string &capfile)
+         if (skip_funcs->exists_ignore_dot_number(fname) ||
+             kernel_api->exists_ignore_dot_number(fname))
+           continue;
+-
++        if(fname=="_printk"||fname=="security_capable")
++          continue;
+         // for each of the function argument
+         for (unsigned int i = 0; i < ci->getNumArgOperands(); ++i) {
+           Value *capv = ci->getArgOperand(i);
+           int pos = use_parent_func_arg(capv, f);
+           if (pos == cap_pos) {
+             pass_data_next[child] = i;
++            errs()<<"ci loc:";
++            ci->getDebugLoc().print(errs());
++            errs()<<"mjzadd: add data_next:"<<f->getName()<<":"<<cap_pos<<" introduce child function "<<child->getName()<<" with arg_pos "<<pos<<"\n";
+             break;
+           }
+         }
+       }
+     }
+   }
++  for (auto fpair : pass_data_next) {
++    Function *f = fpair.first;
++    int cap_pos = fpair.second;
++    errs()<<"mjzadd:in pass_data_next "<<f->getName()<<":"<<cap_pos<<"\n";
++  }
+   // merge result of first round
+   if (pass_data_next.size()) {
+     errs() << ANSI_COLOR(BG_WHITE, FG_RED)
+diff --git a/gatlin/gating_function_base.h b/gatlin/gating_function_base.h
+index 0c64cd8..4d7ca63 100644
+--- a/gatlin/gating_function_base.h
++++ b/gatlin/gating_function_base.h
+@@ -30,6 +30,11 @@ public:
+   virtual bool is_gating_function(std::string &) { return false; };
+   virtual void dump(){};
+   virtual void dump_interesting(InstructionSet *);
++  //mjzadd
++  virtual int getposfromfunc(Function*)
++  {
++      return 0;
++  };
+ };
+ 
+ class GatingCap : public GatingFunctionBase {
+@@ -54,6 +59,8 @@ public:
+   virtual bool is_gating_function(std::string &);
+   virtual void dump();
+   virtual void dump_interesting(InstructionSet *);
++  //mjz test
++  virtual int getposfromfunc(Function*);
+ };
+ 
+ class GatingLSM : public GatingFunctionBase {
+@@ -71,6 +78,7 @@ public:
+   virtual bool is_gating_function(Function *);
+   virtual bool is_gating_function(std::string &);
+   virtual void dump();
++  
+ };
+ 
+ class GatingDAC : public GatingFunctionBase {
+diff --git a/gatlin/gatlin.cpp b/gatlin/gatlin.cpp
+index 448011a..00d4164 100644
+--- a/gatlin/gatlin.cpp
++++ b/gatlin/gatlin.cpp
+@@ -36,8 +36,1226 @@ std::list<int> x_dbg_idx;
+ 
+ std::mutex x_lock;
+ 
++//mjz add
++static const string potentials[]={"inode_owner_or_capable","memcpy","VFS_I","cap_inode_removexattr","ocfs2_reflink_ioctl","fsnotify_create","cap_convert_nscap","copy_from_user","xfs_setattr_nonsize","file_mnt_user_ns","scm_check_creds","gid_eq","commit_creds","uid_eq","proc_cap_handler","proc_doulongvec_minmax","mark_inode_dirty","lock_sock","__builtin_expect","__dynamic_pr_debug","arch_static_branch","sock_net","test_bit","__builtin_bswap16","arch_static_branch_jump","sock_set_flag","sock_reset_flag","_raw_write_unlock_irq","init_completion","hci_sock_bind","atomic_inc","do_ipv6_setsockopt","INIT_LIST_HEAD","do_ip_setsockopt","__ab_c_size","queue_work","dgram_setsockopt","kzalloc","net_eq","spinlock_check","dev_load","__builtin_bswap32","spin_unlock_irqrestore","readl","yam_ioctl","fd_install","copy_to_user","__ilog2_u32","hdlcdrv_ioctl","iminor","refcount_read","writel","__builtin_constant_p","__ilog2_u64","atomic_dec","__roundup_pow_of_two","refcount_set","__builtin_clzll","list_del_init","netlink_ack","static_key_slow_inc","cpumask_weight","alloc_netdev_mqs","route_doit","tty_kref_put","nlmsg_attrlen","free_netdev","tty_vhangup","caif_create","get_device","compat_ptr","static_key_slow_dec","array_index_mask_nospec","register_netdevice","bpf_map_init_from_attr","list_add_tail_rcu","addr_doit","netdev_priv","put_net","cpumask_and","mlx5_ib_devx_create","uverbs_copy_to","handle_alloc_dm_sw_icm","memdup_sockptr","__preempt_count_add","__preempt_count_sub","get_file","list_add_tail","file_inode","mmap_write_unlock","mmap_read_unlock","dec_rlimit_ucounts","test_ti_thread_flag","mmap_read_lock","ipc_unlock_object","list_empty","i_size_read","task_pid_nr","fdget","bttv_s_fbuf","iommu_group_store_type","vivid_vid_cap_s_fbuf","host_store_hp_ssd_smart_path_status","list_add","cpu_online","fdput","dma_map_single_attrs","ata_sas_scsi_ioctl","saa7134_s_fbuf","scsi_ioctl_common","_dev_warn","scsi_ioctl_reset","vidioc_s_fbuf","i_size_write","sg_proc_write_adio","scsi_debug_write_info","kmalloc_array","host_store_raid_offload_debug","sg_scsi_ioctl","sg_proc_write_dressz","mode_store","security_locked_down","__dynamic_dev_dbg","mntns_install","set_fs_root","proc_dointvec_minmax","instrument_atomic_write","ioprio_check_cap","alloc_pipe_info","pipe_is_unprivileged_user","tty_kref_get","ocfs2_ioctl","single_open","copy_namespaces","pipe_set_size","dget","bdev_get_queue","too_many_unix_fds","put_ipc_ns","copy_process","spin_lock_irq","spin_unlock_irq","_dev_err","ldisc_open","__do_sys_fanotify_init","memdup_user_nul","check_syslog_permissions","anon_inode_getfd","mpol_put","rtc_dev_ioctl","audit_netlink_ok",};
++
++
+ ////////////////////////////////////////////////////////////////////////////////
+ 
++string gatlin::GetCapName(CallInst* ci)
++{
++    string cap_name="";
++    if(Function* _f = get_callee_function_direct(ci))
++    {
++        if(gating->is_gating_function(_f))
++        {
++            
++            int cap_no=gating->getposfromfunc(_f);
++            Value* capv = ci->getArgOperand(cap_no);
++            if (!isa<ConstantInt>(capv))
++            {
++                errs()<<"capability is not constant\n";
++                return "unknowncap";
++            }
++            cap_no = dyn_cast<ConstantInt>(capv)->getSExtValue();
++            if (!((cap_no>=CAP_CHOWN) && (cap_no<=CAP_LAST_CAP)))
++            {
++                errs()<<"illeagal capability num "<<cap_no<<"\n";
++                return cap_name;
++            }
++            //errs()<<"in function "<<cap2string[cap_no]<<"\n";
++            cap_name=cap2string[cap_no];
++            //errs()<<"=====in callinst "<<*ci<<"\n";
++            //errs()<<"cap "<<cap_name<<" used by "<<_f->getName()<<"\n";
++        }
++    }
++    return cap_name;
++}
++
++void gatlin::getfunparam()
++{
++  for(auto f:all_functions)
++  {
++    if(f->getName()=="call_usermodehelper")
++    {
++      errs()<<"find call_umh()\n";
++      //int ii = 0;
++      for (auto a = f->arg_begin(), b = f->arg_end(); a != b; ++a) {
++        //if (ii==0)
++          errs()<<" arg of call_umh "<<*a<<"\n";
++      }
++      for (Function::iterator fi = f->begin(), fe = f->end(); fi != fe; ++fi) {
++        BasicBlock *bb = dyn_cast<BasicBlock>(fi);
++        for (BasicBlock::iterator ii = bb->begin(), ie = bb->end(); ii != ie; ++ii) {
++            CallInst *ci = dyn_cast<CallInst>(ii);
++            if (!ci)
++              continue;                    
++            // we are expecting a direct call
++            Function *child = get_callee_function_direct(ci);
++            if (!child)
++              continue;
++            auto fname = std::string(child->getName());
++            // dont bother if this belongs to skip function
++            if (skip_funcs->exists_ignore_dot_number(fname) ||
++                kernel_api->exists_ignore_dot_number(fname))
++              continue;
++            if(fname=="_printk"||fname=="security_capable")
++              continue;
++            // for each of the function argument
++            if (fname=="call_usermodehelper_setup")
++            {
++              errs()<<"find call_umh_setup in cal_umh()!\n";
++              for (auto a = f->arg_begin(), b = f->arg_end(); a != b; ++a) {
++                errs()<<" arg of call_umh_setup "<<*a<<"\n";
++              }
++            }              
++            for (unsigned int i = 0; i < ci->getNumArgOperands(); ++i) {
++              Value *capv = ci->getArgOperand(i);
++              // if (i==0)
++              //   errs()<<"value for arg0:"<<fname <<*capv<<"\n";
++              int pos = use_parent_func_arg(capv, f);
++              if (pos!=-1)
++                errs()<<fname<<"::"<<pos<<"\n";
++              if (pos == 0) {
++                errs()<<"ci loc:";
++                ci->getDebugLoc().print(errs());
++                errs()<<"mjzadd callee:"<<f->getName()<<":"<<0<<" introduce child function "<<child->getName()<<" with arg_pos "<<pos<<"\n";
++                break;
++              }
++            }
++            }
++          }
++
++    }   
++    if(f->getName()=="call_usermodehelper_setup")
++    {
++      errs()<<"find call_usermodehelper_setup()\n";
++      for (auto u : f->users()) {
++      InstructionSet uis;
++      if (Instruction *i = dyn_cast<Instruction>(u))
++        uis.insert(i);
++      else
++        uis = get_user_instruction(dyn_cast<Value>(u));
++      if (uis.size() == 0) {
++        u->print(errs());
++        errs() << "\n";
++        continue;
++      }
++      for (auto ui : uis) {
++        CallInst *cs = dyn_cast<CallInst>(ui);
++        if (cs == NULL)
++          continue; // how come?
++        Function *callee = get_callee_function_direct(cs);
++        if (callee != f)
++          continue;
++        Value *capv = cs->getArgOperand(0);
++        if (isa<ConstantInt>(capv))
++          continue;
++        Function *parent_func = cs->getFunction();
++        errs()<<"call_umh_setup parent func: "<<parent_func->getName()<<"\n";
++        // we have a wrapper,
++        int pos = use_parent_func_arg(capv, parent_func);
++        if (pos >= 0) {
++          // type 1 wrapper, cap is from parent function argument
++          errs()<<"mjzadd caller:"<<f->getName()<<":"<<0<<" parent function "<<parent_func->getName()<<" with arg_pos "<<pos<<"\n";
++        } else {
++          // type 2 wrapper, cap is from inside this function
++          // what to do with this?
++          // llvm_unreachable("What??");
++        }
++      }
++    }
++    }
++  }
++}
++
++
++void gatlin::mjz_refine_tarfuncs()
++{
++    errs()<<"how many func in kernel ?"<<all_functions.size()<<"\n";
++    errs()<<"how many funcs contains cap checker? "<<f2chks.size()<<"\n";
++    for(auto& pair:f2chks)
++    {
++        Function* f=pair.first;       
++        InstructionSet* chks=pair.second;
++        if(!chks->empty())
++        {
++            tar_funcs.insert(f);
++        }        
++    }
++    errs()<<"how many funcs in tar_funcs now? "<<tar_funcs.size()<<"\n";
++    int count = 0;
++    for(auto func:tar_funcs)
++    {
++        FunctionSet* chkfs=new FunctionSet();
++        //use own DS,instruction in  f2chk is not ordered!
++        CallInstList* calls=new CallInstList();
++        string capname="";
++        for(Function::iterator fi = func->begin(), fe = func->end(); fi != fe; ++fi)
++        {
++            BasicBlock* bb = dyn_cast<BasicBlock>(fi);
++            for (BasicBlock::iterator ii = bb->begin(), ie = bb->end(); ii!=ie; ++ii)
++            {
++                if (CallInst* ci = dyn_cast<CallInst>(ii))
++                {
++                    if (Function* _f = get_callee_function_direct(ci))
++                    {
++                        if (gating->is_gating_function(_f))
++                        {
++                            count++;
++                            chkfs->insert(_f);
++                            calls->push_back(ci);
++                            string temp=GetCapName(ci);
++                            capname=capname+" "+temp;
++                        }
++                    }
++                }
++            }
++        }
++        errs()<<"tar func "<<func->getName()<<":"<<capname<<"\n";
++        funcs2funcalls[func]=calls;
++    }
++    errs()<<"how many cap check point? "<<count<<"\n";
++}
++
++//mjz initialize file_related data struct type and pos to mem:mi2p<type,int>
++void gatlin::structdb_init()
++{
++    
++    minames.insert("struct.file_operations");
++
++    string mi_name="struct.ctl_table";
++    mi2p[mi_name]=0;
++    string mi_name1="struct.pid_entry";
++    mi2p[mi_name1]=0;
++    
++    string m_name="sysctl_base_table";
++    m2pn[m_name]="/proc/sys";
++    string m_name6="vm_table";
++    m2pn[m_name6]="/proc/sys/vm";
++    string m_name7="kernel_table";
++    m2pn[m_name7]="/proc/sys/kernel";
++    string m_name1="seccomp_sysctl_table";
++    m2pn[m_name1]="/proc/sys/kernel/seccomp";
++    string m_name2="net_core_table";
++    m2pn[m_name2]="/proc/sys/net/core";
++    string m_name3="ipv4_table";
++    m2pn[m_name3]="/proc/sys/net/ipv4";
++    string m_name4="tgid_base_stuff";
++    m2pn[m_name4]="/proc/<pid>";
++    string m_name5="tid_base_stuff";
++    m2pn[m_name5]="/proc/<pid>/Task/<TID>";//is it correct？
++}
++void gatlin::mjz_prepare()
++{
++    ofstream outfile;
++    outfile.open("sys_result.txt", ios::out | ios::trunc );
++    outfile.close();
++}
++void dump_val_name_type(Value* v,string str1){
++    errs()<<str1<<" name:"<<v->getName() <<" type:";
++    v->getType()->print(errs());
++    errs()<<"\n";
++}
++void find_function_uses_sub(Value* f, int level,GlobalVariableSet& maygv){
++    if(level >= 18)
++        return;
++    errs()<<"now is level: "<<level<< "\n";
++    dump_val_name_type(f,"f");
++    if(Instruction *I=dyn_cast<Instruction>(f)){
++        errs()<< "opcode name:"<< I->getOpcodeName() <<" belongs to func:"<<I->getFunction()->getName()<<"\n";
++    }
++    else if(Function* func = dyn_cast<Function>(f)){
++        errs()<< "f is a function, named:"<< f->getName() << "\n";
++        //errs()<< "f func content:\n";
++        //errs()<< *f << "\n";
++    }
++    else if(GlobalVariable *g=dyn_cast<GlobalVariable>(f))
++    {
++        //errs()<<"found gv: "<<g->getName()<<"\n";
++        if(maygv.find(g)==maygv.end()){
++            maygv.insert(g);
++        }
++    }
++    errs()<< "f has n uses"<< f->getNumUses() << "\n";
++    if(CallInst* call=dyn_cast<CallInst>(f))
++    {
++        Function* caller=call->getParent()->getParent();
++        errs()<<"find a call's parent function, named: "<<caller->getName()<<"\n";
++        find_function_uses_sub(caller,level+1,maygv);
++    }
++    else{
++        for (auto* u: f->users()){
++            find_function_uses_sub(u,level+1,maygv);
++            //break;
++        }
++    }
++}
++Type* gatlin::getTypeFrommi2m(GlobalVariable* g)
++{
++    string global=g->getName().str();
++    for(auto msi:mi2m)
++    {
++        StructType *stype=dyn_cast<StructType>(msi.first);
++        for(auto m:(*msi.second))
++        {
++            if(m->getName()==global)
++            {
++                //errs()<<"find type of global var:"<<global<<"\n";
++                return stype;
++            }                    
++        }
++    }
++    return NULL;    
++}
++
++string gatlin::getTypeName(GlobalVariable* g)
++{
++    string name;
++    Type* type=getTypeFrommi2m(g);
++    if(type)
++    {
++        if(StructType *st = dyn_cast<StructType>(type))
++        {
++            if(st->hasName())
++            {
++                name=st->getStructName().str();
++                str_truncate_dot_number(name);
++                //errs()<<"usermodehelper type name is "<<name<<"\n";
++            }
++        }
++    }
++    return name;
++}
++
++//who used targrt value in global var?
++ValueSet getValueUserinStruct(Value* usedby, ConstantStruct* aggrstruct)
++{
++    
++    ValueSet res_valset;
++    int struct_size=aggrstruct->getNumOperands();
++    
++    //int debug=0;
++    //errs()<<"used by in getVinStruct is "<<*usedby<<"\n";
++    //errs()<<"in getvalueinstruct struct_size is "<<struct_size<<"\n";
++    //find global var used case
++    if(GlobalVariable *gused=dyn_cast<GlobalVariable>(usedby))
++    {
++       
++        for(int si=0;si<struct_size;si++)
++        {
++            Value *stru_mem=aggrstruct->getOperand(si);
++            if(ConstantStruct *innerstruct=dyn_cast<ConstantStruct>(stru_mem))
++            {
++                res_valset=getValueUserinStruct(usedby,innerstruct);
++                if(!res_valset.empty())
++                {
++                    //errs()<<" resolved inner struct,get inner struct "<<res_valset.size()<<"\n";
++                    return res_valset;
++                }
++                else
++                {
++                    continue;
++                }
++                
++            }
++            //tgid_base_stuff mem is pid_entry
++            if(GlobalVariable* guser=dyn_cast<GlobalVariable>(stru_mem) )
++            {
++                if(guser->getName()==gused->getName())
++                {
++                    errs()<<"find gv in struct\n";
++                    res_valset.insert(aggrstruct);
++                }
++            }
++            if(const ConstantExpr *CE = dyn_cast<ConstantExpr>(stru_mem))
++            {
++                Value *firstop = CE->getOperand(0);
++                //directly got a global var
++                if (GlobalVariable *GV = dyn_cast<GlobalVariable>(firstop))
++                {
++                    if(GV->getName()==gused->getName())
++                    {
++                        //errs()<<"array struct used globalvar "<<gused->getName()<<"\n";
++                        
++                        res_valset.insert(aggrstruct);
++                     
++                    }
++                }
++                //bitcast global var
++                if(const ConstantExpr *ce_gv = dyn_cast<ConstantExpr>(firstop))
++                {
++                    u32_t opcode = ce_gv->getOpcode();
++                    if (opcode == Instruction::BitCast)
++                    {
++                        //errs()<<"get a bitcast!!!!!\n ";
++                        const Value *bitcastValue = ce_gv->getOperand(0);
++                        //errs()<<"target global var is "<<gused->getName()<<"\n";
++                        if (const GlobalVariable *gv = dyn_cast<GlobalVariable>(bitcastValue))
++                        {
++                            if(gv->getName()==gused->getName())
++                            {
++                                res_valset.insert(aggrstruct);
++                            }
++                            // errs()<<"get a global var "<<gv->getName()<<"\n";
++                        }
++                    }
++                }
++            } 
++        }
++    }
++    if(Function *fused=dyn_cast<Function>(usedby))
++    {                                                            
++        for(int i=0;i<struct_size;i++)
++        {
++            Value *stru_mem=aggrstruct->getOperand(i);
++            string tmp_name;
++        
++            if(ConstantStruct *innerstruct=dyn_cast<ConstantStruct>(stru_mem))
++            {
++                res_valset=getValueUserinStruct(usedby,innerstruct);
++                if(!res_valset.empty())
++                {
++                    //errs()<<" resolved inner struct,get inner struct "<<res_valset.size()<<"\n";
++                    return res_valset;
++                }
++                else
++                {
++                    continue;
++                }
++                
++            }
++            //direct uesd by a func
++            if(Function *funptr=dyn_cast<Function>(stru_mem))
++            {
++                if(funptr->getName()==fused->getName())
++                {
++                    res_valset.insert(aggrstruct);
++                    continue;
++                }                          
++            }
++            //function is bitcasted
++            if(const ConstantExpr* ce_fun=dyn_cast<ConstantExpr>(stru_mem))
++            {
++                u32_t opcode = ce_fun->getOpcode();
++                if (opcode == Instruction::BitCast)
++                {
++                    const Value *bitcastValue = ce_fun->getOperand(0);
++                    if (const Function *func = dyn_cast<Function>(bitcastValue)) 
++                    {
++                        if(func->getName()==fused->getName())
++                        {
++                            //errs()<<"bitcast value is function\n";
++                            res_valset.insert(aggrstruct);
++                        }
++                    }
++                    
++                }
++            }
++        }
++    }
++    
++    return res_valset;
++}
++
++//get string name from struct pos
++string getPnamefromStruct(int stru_pos,Value* val)
++{
++    string tmp_path;
++    if(ConstantStruct* aggrstruct=dyn_cast<ConstantStruct>(val))
++    {
++        Value *sval=aggrstruct->getOperand(stru_pos);
++        if (const ConstantExpr *CE = dyn_cast<ConstantExpr>(sval)) 
++        {
++            Value *firstop = CE->getOperand(0);
++            if (GlobalVariable *GV = dyn_cast<GlobalVariable>(firstop)){
++                Constant *v = GV->getInitializer();
++                if(ConstantDataArray *a=dyn_cast<ConstantDataArray>(v))
++                {
++                    tmp_path=a->getAsCString().str();
++                    //errs()<<a->getAsCString()<<"\n";
++                    
++                }
++            }
++        }
++    }
++    return tmp_path;
++}
++
++bool getValueUserinStructDeep(Value* usedby, ConstantStruct* aggrstruct, list<string>& names)
++{
++    int struct_size=aggrstruct->getNumOperands();
++    int ret=false;
++    if(Function *fused=dyn_cast<Function>(usedby))
++    {
++        for(int i=0;i<struct_size;i++)
++        {
++            Value *stru_mem=aggrstruct->getOperand(i);
++            string tmp_name;
++            if(i==0)
++            {
++                 if (const ConstantExpr *CE = dyn_cast<ConstantExpr>(stru_mem)) 
++                {
++                    Value *firstop = CE->getOperand(0);
++                    if (GlobalVariable *GV = dyn_cast<GlobalVariable>(firstop)){
++                        Constant *v = GV->getInitializer();
++                        if(ConstantDataArray *a=dyn_cast<ConstantDataArray>(v))
++                        {
++                            tmp_name=a->getAsCString().str();
++                            names.push_back(tmp_name);
++                            continue;
++                            //errs()<<a->getAsCString()<<"\n";
++                        }
++                    }
++                    
++                }
++            }
++           if(ConstantStruct *innerstruct=dyn_cast<ConstantStruct>(stru_mem))
++            {
++                
++                bool _ret=getValueUserinStructDeep(usedby,innerstruct,names);
++                if(_ret==true)
++                {
++                    //errs()<<" resolved inner struct,get inner struct "<<res_valset.size()<<"\n";
++                    return true;
++                    //continue;
++                }
++                else
++                {
++                    continue;
++                }
++                
++            }
++            
++             //function is bitcasted
++            if(const ConstantExpr* ce_fun=dyn_cast<ConstantExpr>(stru_mem))
++            {
++                u32_t opcode = ce_fun->getOpcode();
++                if (opcode == Instruction::BitCast)
++                {
++                    
++                    const Value *bitcastValue = ce_fun->getOperand(0);
++                    if (const Function *func = dyn_cast<Function>(bitcastValue)) 
++                    {
++                        if(func->getName()==fused->getName())
++                        {
++                            ret=true;
++                            //errs()<<"deep find fun "<<fused->getName()<<"\n";
++                            if(names.empty())
++                                errs()<<"in deep names empty\n";
++                            
++                        }
++                    }
++                    
++                }
++            }
++            if(i==struct_size-1 && ret!=true)
++            {
++                if(!names.empty())
++                    names.pop_front();
++            }
++        }
++    }
++    return ret;
++}
++
++
++//get tmp path from globalvar
++list<string> gatlin::getTmpPathfromGV(Value* usedby,GlobalVariable*g)
++{
++    list<string> retpaths;    
++    Constant *gini=g->getInitializer();
++    ValueSet users;
++    string name;
++    if(!gini->isZeroValue())
++    {
++        ConstantAggregate *constaggr=dyn_cast<ConstantAggregate>(gini);
++        if(constaggr)
++        {
++            //errs()<<"pid_base is aggregate constant\n";
++            ConstantStruct *aggrstruct=dyn_cast<ConstantStruct>(constaggr);
++            if (aggrstruct)
++            {                
++                //errs()<<"we get a aggrStruct !!!!!!\n";
++                users=getValueUserinStruct(usedby,aggrstruct);
++                if(!users.empty())
++                {
++                    if(Function *fused=dyn_cast<Function>(usedby))
++                    {
++                        if(fused->getName()=="proc_pid_status")
++                        {
++                            errs()<<"after getValueUserinStruct get users "<<users.size()<<"\n";
++                            for(auto valuser:users)
++                            {
++                                StructType* stype=dyn_cast<StructType>(valuser->getType());
++                                if(!stype)
++                                    errs()<<"did not get user type,user is not a struct\n";
++                                else
++                                {}
++                            }
++                        }
++                    }
++                    
++                    for(auto valuser:users)
++                    {
++                        StructType* stype=dyn_cast<StructType>(valuser->getType());
++                        if(stype)
++                        {
++                            if(!stype->hasName())
++                              continue;
++                            name=stype->getStructName().str();
++                            str_truncate_dot_number(name);
++                            if(!name.empty()&&mi2p.find(name)!=mi2p.end())
++                            {
++                                int pos=mi2p[name];
++                                //get path name from struct.pos
++                                string tmp_path;
++                                tmp_path=getPnamefromStruct(pos,valuser);
++                                retpaths.push_back(tmp_path);
++                            }
++                            if(name.empty())
++                            { //path name所在结构体和被使用到的value user所指向的结构体不在一层
++                                bool ret;
++                                list<string> names;
++                                ret=getValueUserinStructDeep(usedby,aggrstruct,names);
++                                if(ret==true)
++                                {
++                                    for(auto name:names)
++                                    {
++                                        retpaths.push_back(name);
++                                    }
++                                }
++                            }
++                        }
++                        
++                    }
++                }
++                }
++            ConstantArray *aggrarray=dyn_cast<ConstantArray>(constaggr);
++            if (aggrarray)
++            {
++                int array_size=aggrarray->getNumOperands();
++                for(int ai=0;ai<array_size;ai++)
++                {
++                    Value *constructval=aggrarray->getOperand(ai);
++                    if(ConstantStruct *astruct=dyn_cast<ConstantStruct>(constructval))
++                    {
++                        users=getValueUserinStruct(usedby,astruct);
++                        StructType* astype=dyn_cast<StructType>(aggrarray->getType());
++
++                        if(!users.empty())
++                        {
++                            name=getTypeName(g);
++                            //errs()<<"get global var struct name"<<name<<"\n";
++                            for(auto valuser:users)
++                            {
++                                StructType* stype=dyn_cast<StructType>(valuser->getType());
++                                if(stype)
++                                {
++                                    if(!name.empty()&&mi2p.find(name)!=mi2p.end())
++                                    {
++                                        int pos=mi2p[name];
++                                        string tmp_path;
++                                        tmp_path=getPnamefromStruct(pos,valuser);
++                                        retpaths.push_back(tmp_path);
++                                    }
++                                }
++                                
++                            }
++                        }
++                        }
++                }
++            }
++
++        }
++    }    
++    return retpaths;
++}
++void addPath(list<string>& cur_path,list<string>& base_path,list<string>& res_path)
++{   
++    if(cur_path.empty())
++    {
++        //errs()<<"[!]err:cur_path empty \n";
++        return;
++    }
++    if(base_path.empty())
++    {
++        res_path.assign(cur_path.begin(),cur_path.end());
++    }
++    else{
++        for(list<string>::iterator it=cur_path.begin();it!=cur_path.end();it++)
++        {
++            for(list<string>::iterator _it=base_path.begin();_it!=base_path.end();_it++)
++            {
++                string s=*it+"/"+*_it;
++                res_path.push_back(s);
++            }
++        }
++    }
++}
++
++//find which functions used target function
++void find_function_uses(Value* f,ValueSet& visited,FunctionSet& res)
++{
++    //find_function_uses_sub(f,0);
++    
++    if (visited.count(f))
++        return;
++    visited.insert(f);
++    for (auto* u: f->users())
++    {
++        //dump_val_name_type(u,"u");
++        if(Instruction *I=dyn_cast<Instruction>(u))
++        {
++            Function *caller=I->getParent()->getParent();
++            //judge if is a root ctl_table
++            if(CallInst* call=dyn_cast<CallInst>(I))
++            {
++                //caller=;
++                if(res.find(caller)!=res.end())
++                    continue;
++                else
++                {
++                    res.insert(caller);
++                    //errs()<<"function "<<f->getName()<<" parent is "<<caller->getName()<<"\n";
++                    //find_function_uses(caller,visited,res);
++                    continue;
++                }
++            }
++        }
++        //find_function_uses(u,visited,res);
++    }
++    return;
++}
++void find_functions_usedgv(Value* f,ValueSet& visited,FunctionSet& res,Function* func)
++{
++  if (visited.count(f))
++        return;
++    visited.insert(f);
++    for (auto* u: f->users())
++    {     
++        if(Function* function = dyn_cast<Function>(u))
++        {
++
++        }
++    }
++
++}
++void gatlin::getPath2Base(Value* used,GlobalVariable* g,list<string>& paths,int depth)
++{
++    if(depth>5)
++    {
++        return;
++    }
++    //errs()<<"in getPath2Base "<<g->getName()<<"\n";
++    string gname=g->getName().str();
++    list<string> cur_path;
++    list<string> res_path;
++    Type* stype= getTypeFrommi2m(g);
++    string stype_name="";
++    /*if(gname=="usermodehelper_table"||gname=="kern_table"||gname=="sysctl_base_table")
++    {
++        errs()<<"## in getpath2base is function proc_cap_handler!\n";
++        errs()<<"gname is "<<gname<<"\n";
++    }*/
++
++    //get a base global var
++    if(m2pn.find(gname)!=m2pn.end())
++    {
++        cur_path=getTmpPathfromGV(used,g);    
++        addPath(cur_path,paths,res_path);       
++        if(res_path.empty())
++        {
++            errs()<<"[!]err:res_path empty.didnt get a path from base struct \n";
++        }
++        paths.clear();
++        string root=m2pn[gname];
++        for(list<string>::iterator it=res_path.begin();it!=res_path.end();it++)
++        {
++            string complete=root+'/'+*it;
++            paths.push_back(complete);
++
++        }
++        /*
++        if(gname=="sysctl_base_table")
++        {
++            for(list<string>::iterator it=res_path.begin();it!=res_path.end();it++)
++            {
++                errs()<<*it<<"\n";
++            }
++        }*/
++        return;
++    }
++    //global var is a known type
++    if(stype)
++    {
++        stype_name=stype->getStructName().str();
++        str_truncate_dot_number(stype_name);
++    }
++    if(mi2p.find(stype_name)!=mi2p.end())
++    {
++        cur_path=getTmpPathfromGV(used,g);
++        addPath(cur_path,paths,res_path);
++        //test if is a root ctl_table
++        ValueSet visited;
++        FunctionSet res;
++        find_function_uses(g,visited,res);
++        if(res_path.empty())
++        {
++            errs()<<"[!]err:res_path empty.didnt get a path from known type struct \n";
++            return;
++        }
++        paths.clear();
++        paths.assign(res_path.begin(),res_path.end());      
++    }
++    else
++    {
++        //errs()<<"we found a global var **"<<gname<< "** related to tar_fun, but dont know how to reslove it\n";
++        /*if(gname=="pci_bus_type")
++        {
++            errs()<<"!!!!!!pci_bus_type related func is "<<tar_fun->getName()<<"\n";
++        }*/
++        if(!stype_name.empty())
++            minames.insert(stype_name);
++    }
++   
++    ValueSet visited;
++    GlobalVariableSet res;
++    Function* func=NULL;
++    FunctionSet funres;
++    find_globalvar_uses(g,visited,res,func);
++    
++    list<string> all_brunchs;
++    list<string> child_res;
++    
++    if(res.empty()){
++      //try find functions used g
++        find_functions_usedgv(g,visited,funres,func);
++        errs()<<"[!]err:didnt get global var used "<<g->getName()<<"\n";
++        return;
++    }
++    //errs()<<"globalvar "<<g->getName()<<" is used by "<<res.size()<<" globalvars\n";
++    list<string> tmp;
++    list<string> backup;
++    backup.assign(paths.begin(),paths.end());
++    paths.clear();
++    errs()<<"in depth "<<depth<<"\n";
++    for(auto gv:res)
++    {
++        errs()<<"   "<<g->getName()<<" parent globalvar name is "<<gv->getName()<<"\n";
++        tmp.assign(backup.begin(),backup.end());
++        getPath2Base(g,gv,tmp,depth+1);
++        for(list<string>::iterator it=tmp.begin();it!=tmp.end();it++)
++        {
++            paths.push_back(*it);
++        }
++        tmp.clear();
++        /*
++        list<string> child_brunch;
++        child_brunch.assign(paths.begin(),paths.end());
++        getPath2Base(g,gv,child_brunch,depth+1);
++        if(child_brunch.empty())
++        {
++            //errs()<<"[!]err:didnt get child brunch for used val "<<g->getName()<<" and user "<<gv->getName()<<"\n";
++        }
++        else
++        {
++            for(list<string>::iterator it=child_brunch.begin();it!=child_brunch.end();it++)
++            {
++                all_brunchs.push_back(*it);
++            }
++        }        
++        */
++    }
++    /*
++    addPath(all_brunchs,paths,child_res);
++    paths.clear();
++    paths.assign(child_res.begin(),child_res.end());*/
++}
++
++
++string tryGetPath(Function*f,GlobalVariable* g)
++{
++    //errs()<<f->getName()<<" used gv "<<g->getName()<<"\n";
++    string dir="";
++    string path="";
++    for(Function::iterator it=f->begin(),ie=f->end();it!=ie;++it)
++    {
++        BasicBlock* bb=dyn_cast<BasicBlock>(it);
++        for(BasicBlock::iterator bi=bb->begin(),be=bb->end();bi!=be;++bi)
++        {
++            if(CallInst* fcall=dyn_cast<CallInst>(bi))
++            {
++                if (Function* fun = get_callee_function_direct(fcall))
++                {
++                    if(fun->getName()=="proc_mkdir")
++                    {
++                       // errs()<<"first arg in proc_mkdir is ";
++                        Value* val=fcall->getOperand(0);
++                        //errs()<<*val<<"\n";
++                        if (const ConstantExpr *CE = dyn_cast<ConstantExpr>(val)) 
++                        {
++                            Value *firstop = CE->getOperand(0);
++                            if (GlobalVariable *GV = dyn_cast<GlobalVariable>(firstop))
++                            {
++                                Constant *v = GV->getInitializer();
++                                if(ConstantDataArray *a=dyn_cast<ConstantDataArray>(v))
++                                {
++                                    string tmp_path=a->getAsCString().str();
++                                    //errs()<<a->getAsCString()<<"\n";
++                                    dir="/"+tmp_path;
++                                }
++                            }
++                        }
++                    }
++                    string::size_type idx;
++                    idx=fun->getName().find("proc_create");
++                    if(idx!=string::npos)
++                    {
++                        Value* ops=fcall->getOperand(3);
++                        if(GlobalVariable* gv=dyn_cast<GlobalVariable>(ops))
++                        {
++                            if(gv->getName()==g->getName())
++                            {
++                                //errs()<<"in proc_create:"<<gv->getName()<<"\n";
++                                Value* val=fcall->getOperand(0);
++                                if (const ConstantExpr *CE = dyn_cast<ConstantExpr>(val)) 
++                                {
++                                    Value *firstop = CE->getOperand(0);
++                                    if (GlobalVariable *GV = dyn_cast<GlobalVariable>(firstop))
++                                    {
++                                        Constant *v = GV->getInitializer();
++                                        if(ConstantDataArray *a=dyn_cast<ConstantDataArray>(v))
++                                        {
++                                            string tmp_path=a->getAsCString().str();
++                                            path=dir+"/"+tmp_path;
++                                            //errs()<<"getPath "<<path<<"\n";
++                                            return path;
++                                        }
++                                    }
++                                }
++                            }
++                        }
++                    }
++                }
++            }
++        }
++    }
++    return path;
++}
++
++string tryResolveGV(GlobalVariable* g)
++{   
++    string path="";
++    ValueSet visited;
++    FunctionSet res;
++    find_function_uses(g,visited,res);
++    if(res.empty())
++    {
++        //errs()<<g->getName()<<" is not used by any function \n";
++    }
++    for(auto f:res)
++    {
++        string::size_type idx;
++        idx=f->getName().find("init");
++        if(idx!=string::npos)
++        {
++            path=tryGetPath(f,g);
++            //maybe a char dev type
++            if(path.empty())
++            {
++                //errs()<<"didnt get path:find "<<g->getName()<<" used by suspecious init func "<<f->getName()<<"\n";
++            }
++        }       
++    }
++    return path;
++}
++
++void gatlin::optmize_findgv(Function* f)
++{
++    GlobalVariableSet gvs;
++    find_function_uses_sub(f,0,gvs);
++    errs()<<"optmize_findgv:****find "<<gvs.size()<<" gv\n";
++    list<string> all_paths;
++    for(auto g:gvs)
++    {
++        string name=getTypeName(g);
++        if(mi2p.find(name)!=mi2p.end()||minames.find(name)!=minames.end())
++        {
++            
++            list<string> brunch_path;
++            getPath2Base(f,g,brunch_path,0);
++            for(list<string>::iterator it=brunch_path.begin();it!=brunch_path.end();it++)
++            {
++                //errs()<<*it<<"\n";
++                string s=*it;
++                all_paths.push_back(s);
++            }
++            if(brunch_path.empty())
++            {
++                errs()<<"function "<<f->getName()<<" no brunch path from "<<g->getName()<<"\n";
++            }
++            brunch_path.clear();
++            //resolved_used++;
++            //errs()<<"resolved gv name is "<<G->getName()<<": "<<name<<" related func is "<<f->getName()<<"\n";
++        }
++        //handler proc_ops            
++        if(name=="struct.proc_ops"||name=="struct.file_operations")
++        {
++            string root="/proc";
++            string childpath="";
++            string path=""; 
++            childpath=tryResolveGV(g);
++            if(!childpath.empty())
++            {
++                //errs()<<"function "<<f->getName()<<" did not get path from proc_ops gv"<<G->getName()<<"\n";
++                //continue;
++                path=root+childpath;
++                all_paths.push_back(path);
++                //resolved_used++;
++                //errs()<<"resolved gv name is "<<G->getName()<<" related func is "<<f->getName()<<"\n";
++            }             
++            // else
++            // {
++                //errs()<<"function "<<f->getName()<<" did not get path from proc_ops gv"<<G->getName()<<"\n";
++                //continue;
++            // }
++        }
++        if(all_paths.empty())
++            continue;
++        //GetCapFromFun(f);
++        // errs()<<"^^^^"<<g->getName()<<" ->all paths :^^^^^^\n";
++        for(list<string>::iterator it=all_paths.begin();it!=all_paths.end();it++)\
++        {
++            errs()<<*it<<"\n";
++            StringRef path=*it;
++            if(!path.startswith("/"))
++                errs()<<"may find a new base!\n";
++        }
++    }
++}
++
++Function* gatlin::getLSMsecfun(string fname)
++{
++    //errs()<<"fname is "<<fname<<"\n";
++    string sec="security";
++    fname=fname.replace(0,3,sec);
++    //errs()<<"find LSM function:"<<fname<<"\n";
++    for(auto f:all_functions)
++    {
++        if(f->getName()==fname)
++        {
++            return f;
++        }   
++    }
++}
++
++void gatlin::find_globalvar_uses(Value* f,ValueSet& visited,GlobalVariableSet& res,Function* func)
++{
++    if (visited.count(f))
++        return;
++    visited.insert(f);
++    string fun_name;
++    if(func)
++    {
++        if(Function* fun = dyn_cast<Function>(func))
++        {
++            fun_name=func->getName().str();
++        }
++    }
++    for (auto* u: f->users())
++    {     
++        if(GlobalVariable* G = dyn_cast<GlobalVariable>(u))
++        {
++           // errs()<<"in find_globalvar_use() "<<fun_name<<" is used by global var "<<G->getName()<<"\n";
++           if(res.find(G)!=res.end())
++                continue;
++            else
++            {
++                res.insert(G);
++                //errs()<<"get a user gv: "<<G->getName()<<"\n";
++                
++                if(G->getName()=="capability_hooks"&& func->getName()=="cap_ptrace_access_check")
++                {
++                    errs()<<"used by lsm hook,try get parent gv\n";
++                    //errs()<<func->getName()<<"\n";
++                    //repalce "cap" with "security"
++                    Function* sec_fun=getLSMsecfun(fun_name);
++                    optmize_findgv(sec_fun);
++                    break;
++                }
++                continue;
++            }          
++        }
++        find_globalvar_uses(u, visited,res,func);           
++    }
++}
++
++
++
++
++
++string gatlin::GetCapFromFun(Function* f)
++{   
++    string fun_name=f->getName().str();
++    string caps="";
++    //errs()<<"\n";
++    //get capability name from checker func 
++    errs()<<"function "<<fun_name<<" related cap: ";
++    for(Function::iterator fi = f->begin(), fe = f->end(); fi != fe; ++fi)
++    {
++        BasicBlock* bb = dyn_cast<BasicBlock>(fi);
++        for (BasicBlock::iterator ii = bb->begin(), ie = bb->end(); ii!=ie; ++ii)
++        {
++            if (CallInst* ci = dyn_cast<CallInst>(ii))
++            {
++                if (Function* _f = get_callee_function_direct(ci))
++                {
++                    if (gating->is_gating_function(_f))
++                    {
++                        int cap_no=gating->getposfromfunc(_f);
++                        Value* capv = ci->getArgOperand(cap_no);
++                        if (!isa<ConstantInt>(capv))
++                        {
++                            errs()<<"capability is not constant\n";
++                            continue;
++                        }
++                        cap_no = dyn_cast<ConstantInt>(capv)->getSExtValue();
++                        if (!((cap_no>=CAP_CHOWN) && (cap_no<=CAP_LAST_CAP)))
++                        {
++                            errs()<<"illeagal capability\n";
++                            continue;
++                        }
++                        string cap=cap2string[cap_no];
++                        string::size_type pos=caps.find(cap);
++                        if(pos==caps.npos)
++                        {
++                            caps=caps+cap2string[cap_no]+" ";
++                        }
++                        
++                        //errs()<<cap2string[cap_no]<<" ";
++                    }
++                }
++            }             
++        }
++    }
++    errs()<<caps<<"\n";
++    return caps;
++}
++
++void gatlin::mjz_test(Module& module)
++{
++    structdb_init();
++    //int all=0;
++    int empty_name=0;
++    int usedby_gv=0;
++    int resolved_used=0;
++    errs()<<"in mjz_test!\n";
++    for(auto f:tar_funcs)
++    {       
++        string fun_name=f->getName().str();
++         //fun->gv
++        ValueSet visited;
++        GlobalVariableSet res;      
++        find_globalvar_uses(f,visited,res,f);
++
++        list<string> all_paths;
++        if(res.empty())
++        {
++           // errs()<<"fun->gv\n";
++            //errs()<<"no f->gv used "<<fun_name<<"\n";
++            continue;
++        }
++        errs()<<"tarfunc:"<<f->getName()<<"\n";
++        for(auto G:res)
++        {      
++            Constant *gini=G->getInitializer();
++            if(ConstantStruct* construct=dyn_cast<ConstantStruct>(gini))
++            {
++                StructType *stype=construct->getType();
++                if(stype)
++                {
++                    if (stype->hasName())
++                    {
++                      string sname=stype->getStructName().str();
++                      errs()<<"function "<<f->getName()<<" used by gv, type is "<<sname<<"\n";
++                    }
++                    else{
++                      errs()<<f->getName()<<" is used by gv, but cannot get struct name\n";
++                    }
++                      
++                }
++            }
++            
++            string name=getTypeName(G);
++            usedby_gv++;
++            if(name.empty())
++            {
++                empty_name++;
++            }
++            // errs()<<"gv: "<<G->getName()<<": "<<name<<" related func is "<<f->getName()<<"\n";
++            GetCapFromFun(f);
++            if(mi2p.find(name)!=mi2p.end()||minames.find(name)!=minames.end())
++            {
++                list<string> brunch_path;
++                getPath2Base(f,G,brunch_path,0);
++                for(list<string>::iterator it=brunch_path.begin();it!=brunch_path.end();it++)
++                {
++                    //errs()<<*it<<"\n";
++                    string s=*it;
++                    all_paths.push_back(s);
++                }
++                if(brunch_path.empty())
++                {
++                    //errs()<<"function "<<f->getName()<<" no brunch path from "<<G->getName()<<"\n";
++                }
++                brunch_path.clear();
++                resolved_used++;
++                errs()<<"resolved gv name is "<<G->getName()<<": "<<name<<" related func is "<<f->getName()<<"\n";
++            }
++            //handler proc_ops            
++            if(name=="struct.proc_ops"||name=="struct.file_operations")
++            {
++                string root="/proc";
++                string childpath="";
++                string path=""; 
++                childpath=tryResolveGV(G);
++                if(!childpath.empty())
++                {
++                    //errs()<<"function "<<f->getName()<<" did not get path from proc_ops gv"<<G->getName()<<"\n";
++                    //continue;
++                    path=root+childpath;
++                    all_paths.push_back(path);
++                    resolved_used++;
++                    //errs()<<"resolved gv name is "<<G->getName()<<" related func is "<<f->getName()<<"\n";
++                }             
++                else
++                {
++                    //errs()<<"function "<<f->getName()<<" did not get path from proc_ops gv"<<G->getName()<<"\n";
++                    //continue;
++                }
++            }
++            if(all_paths.empty())
++                continue;
++            GetCapFromFun(f);
++            errs()<<"^^^^"<<fun_name<<" ->all paths :^^^^^^\n";
++            for(list<string>::iterator it=all_paths.begin();it!=all_paths.end();it++)\
++            {
++                errs()<<*it<<"\n";
++                StringRef path=*it;
++                if(!path.startswith("/"))
++                    errs()<<"may find a new base!\n";
++            }
++        }
++    }
++    errs()<<usedby_gv<<" global var has CAP checker inside function pointer \n";
++    errs()<<empty_name<<" global vars name is empty \n";
++    errs()<<resolved_used<<" global var is resolved\n";
++    errs()<<"\n:) mjz test end "<<"\n";
++}
++
++
++
+ /*
+  * deal with struct name alias
+  */
+@@ -539,7 +1757,7 @@ again:
+   STOP_WATCH_STOP(WID_KINIT);
+   STOP_WATCH_REPORT(WID_KINIT);
+ 
+-  dump_kinit();
++  //dump_kinit();
+ }
+ 
+ ////////////////////////////////////////////////////////////////////////////////
+@@ -2709,6 +3927,492 @@ void gatlin::dump_call_graph(Module &module) {
+   exit(0);
+ }
+ 
++void resolve_attr_gv(GlobalVariable* G,string fname,string cap)
++{    
++    //反向找，从attributes[]遍历每个dev.attr  
++    Constant *gini=G->getInitializer();     
++    if(ConstantArray *aggrarray=dyn_cast<ConstantArray>(gini))
++    {
++        
++        int array_size=aggrarray->getNumOperands();
++        //errs()<<"array has "<<array_size<<" members\n";
++        for(int i=0;i<array_size;++i)
++        {
++            Value* first_mem=aggrarray->getOperand(i); 
++            if( ConstantExpr *CE = dyn_cast<ConstantExpr>(first_mem))  
++            {
++                //errs()<<"inside array is constantexpr\n";          
++                GetElementPtrInst* gep = dyn_cast<GetElementPtrInst>(CE->getAsInstruction());
++                if (Value* tpobj = gep->getPointerOperand())
++                {
++                    //errs()<<"GEP:"<<*tpobj<<"\n";
++                    if(GlobalVariable* m=dyn_cast<GlobalVariable>(tpobj))
++                    {
++                        // errs()<<"tpobj is a GlobalVariable\n";
++                        Indices indices;
++                        get_gep_indicies(gep, indices);
++                        assert(indices.size()!=0);
++                        //should remove first element because it is an array index
++                        //the actual match
++                        indices.pop_front();
++                        // errs()<<"pop after indices size is "<<indices.size()<<"\n";
++                        Value* v = get_value_from_composit(m, indices);
++                        if(v!=NULL)
++                        {
++                            //try resolve struct attribute
++                            StructType* stype=dyn_cast<StructType>(v->getType());
++                            if(stype->getStructName()=="struct.attribute")
++                            { 
++                                if(ConstantStruct* structmem=dyn_cast<ConstantStruct>(v))
++                                {                                
++                                    Value *attr_name=structmem->getOperand(0);
++                                    if (const ConstantExpr *attr_expr = dyn_cast<ConstantExpr>(attr_name)) 
++                                    {
++                                        Value *firstop = attr_expr->getOperand(0);
++                                        if (GlobalVariable *GV = dyn_cast<GlobalVariable>(firstop)){
++                                            Constant *v = GV->getInitializer();
++                                            if(ConstantDataArray *a=dyn_cast<ConstantDataArray>(v))
++                                            {                                           
++                                                string attr_name=a->getAsCString().str();
++                                                errs()<<attr_name<<"; "<<fname<<"; "<<cap<<"\n";
++                                                string tofile=attr_name+";"+fname+";"+cap;
++                                                ofstream write;
++                                                write.open("sys_result.txt", ios::app);
++                                                //用ios::app不会覆盖文件内容
++                                                write << tofile << endl;
++                                                write.close();
++                                            }
++                                        }
++                                    }
++                                }
++                            }
++                            
++                        }
++                        else{
++                            errs()<<"did not get value from composit\n";
++
++                        }
++                    }  
++                }
++            } 
++        } 
++               
++    }
++}
++
++
++//mjz add
++void gatlin::find_function(Module& module)
++{
++// 	int potential_size = sizeof(potentials)/sizeof(potentials[0]);
++//    errs()<<"try find functions\n";
++//    for (const auto& ps: potentials)
++// //   for (int i=0; i < potential_size ;++i)
++//    {
++//         bool flag=false;
++//         auto tarname = ps;
++//         // errs()<<"finding***"<<tarname<<"****\n";
++// 	//const string tarname=potentials[i];
++//         for(auto f:all_functions)
++//         {
++//             string fname=f->getName().str();
++//             if (fname==tarname)
++//                 {flag=true;
++//                 break;}
++//         }
++//         if(!flag)
++//             errs()<<"cannot find "<<tarname<<"\n";
++//    }
++    bool evm=false;
++    for(auto f:all_functions)
++    {
++        string fname=f->getName().str();
++        // string::size_type idx;
++        // idx=fname.find("_sysctl_")
++        if (fname=="__register_sysctl_init" or fname=="register_sysctl_sz")
++        {
++            evm=true;
++            errs()<<"find function:"<<fname<<"~~~~~\n";
++            break;
++        }
++    }
++    if(!evm)
++        errs()<<"can not function!!!!\n";
++}
++
++void gatlin::reslove_function4sys(Function* f)
++{
++    ValueSet visited;
++    GlobalVariableSet res;
++    find_globalvar_uses(f,visited,res,f);
++    //errs()<<"efivar_attr_show is used by "<<res.size()<<" vars\n";
++    for(auto gv:res)
++    {
++        //errs()<<gv->getName()<<" : "<<*gv<<"\n";
++        Constant *gini=gv->getInitializer();
++        if(ConstantStruct* construct=dyn_cast<ConstantStruct>(gini))
++        {
++            StructType *stype=construct->getType();
++            if(stype->hasName())
++            {
++                string sname=stype->getStructName().str();
++                //errs()<<"get struct type  is "<<stype->getStructName()<<"\n";
++                string::size_type idx=sname.find("_attribute");
++                string::size_type _idx=sname.find("sysfs_ops");
++                //potential gv, may contain struct.attribute inside
++                if(idx!=string::npos)
++                {
++                    errs()<<"function "<<f->getName()<<" may used by dev struct: "<<sname<<"\n";
++                    int struct_size=construct->getNumOperands(); 
++                    for(int i=0;i<struct_size;i++)
++                    {
++                        Value *stru_mem=construct->getOperand(i);
++                        if(StructType *inner_struct=dyn_cast<StructType>(stru_mem->getType()))
++                        {
++                            //errs()<<"inner struct type is "<<inner_struct->getStructName()<<"\n";
++                            if(inner_struct->getStructName()=="struct.attribute")
++                            {
++                                //resolve struct attribute
++                                //errs()<<"attribute: "<<*stru_mem<<"\n";
++                                //errs()<<"find struct.attribute: inside\n";
++                                ConstantStruct* attr_struct=dyn_cast<ConstantStruct>(stru_mem);
++                                Value *name=attr_struct->getOperand(0);
++                                //errs()<<"first mem is "<<*name<<"\n";
++                                if (const ConstantExpr *CE = dyn_cast<ConstantExpr>(name)) 
++                                {
++                                    Value *firstop = CE->getOperand(0);
++                                    if (GlobalVariable *GV = dyn_cast<GlobalVariable>(firstop)){
++                                        Constant *v = GV->getInitializer();
++                                        if(ConstantDataArray *a=dyn_cast<ConstantDataArray>(v))
++                                        {
++                                            string attr_name=a->getAsCString().str();
++                                            string fname=f->getName().str();
++                                            string cap=GetCapFromFun(f);
++                                            errs()<<attr_name<<";"<<fname<<";"<<cap<<"\n";
++                                            string tofile=attr_name+";"+fname+";"+cap;
++                                            ofstream write;
++                                            write.open("sys_result.txt", ios::app);
++                                            //用ios::app不会覆盖文件内容
++                                            write << tofile << endl;
++                                            write.close();
++                                        }
++                                    }
++                                }
++                            }
++                        }
++                    }
++                }
++                if(_idx!=string::npos)
++                {
++                    errs()<<"function "<<f->getName()<<" is a sysfs_ops\n";
++                    ValueSet _visited;
++                    GlobalVariableSet _res;
++                    find_globalvar_uses(gv,_visited,_res,f);
++                    //sysfs_ops should be used by kobj_type
++                    for(auto g:_res)
++                    {
++                        errs()<<g->getName()<<" : "<<*g<<"\n";
++                        Constant *con_ktype=g->getInitializer();
++                        if(ConstantStruct* ktype=dyn_cast<ConstantStruct>(con_ktype))
++                        {
++                            StructType *ktype_type=ktype->getType();
++                            if(ktype_type->hasName())
++                            {
++                                string ktype_name=ktype_type->getStructName().str();
++                                //errs()<<"get struct type  is "<<ktype_type->getStructName()<<"\n";
++                                string::size_type ktype_idx=ktype_name.find("kobj_type");
++                                if(ktype_idx!=string::npos)
++                                {                        
++                                    //遍历结构体，取struct[2]位置的attribute
++                                    Value* attr=ktype->getOperand(2);
++                                    //errs()<<"attr val is "<<*attr<<"\n";
++                                    if (const ConstantExpr *CE = dyn_cast<ConstantExpr>(attr)) 
++                                    {
++                                        //errs()<<"is constant expr\n";
++                                        Value *firstop = CE->getOperand(0);
++                                        if (GlobalVariable *GV = dyn_cast<GlobalVariable>(firstop))
++                                        {
++                                            errs()<<"find gv "<<GV->getName()<<"\n";
++                                            string fname=f->getName().str();
++                                            string cap=GetCapFromFun(f);
++                                            resolve_attr_gv(GV,fname,cap);                                                    
++                                        }
++                                    }
++                                    
++                                }
++
++                            }
++                            
++                        }
++                    }
++                    
++                }              
++                else if(sname=="struct.attribute")
++                {
++                    errs()<<"function "<<f->getName()<<" is used by attribute\n";
++                    //resolve attribute
++                    Value *name=construct->getOperand(0);
++                    //errs()<<"first mem is "<<*name<<"\n";
++                    if (const ConstantExpr *CE = dyn_cast<ConstantExpr>(name)) 
++                    {
++                        Value *firstop = CE->getOperand(0);
++                        if (GlobalVariable *GV = dyn_cast<GlobalVariable>(firstop)){
++                            Constant *v = GV->getInitializer();
++                            if(ConstantDataArray *a=dyn_cast<ConstantDataArray>(v))
++                            {
++                            //    if(a->getAsCString()=="vma_ra_enabled")
++                                errs()<<"attribute name is "<<a->getAsCString()<<"\n";
++                            }
++                        }
++                    }
++                }
++                
++            }
++        }
++    }
++}
++
++
++void gatlin::mjz_systest(Module& module)
++{
++    structdb_init();
++    //int all=0;
++    int empty_name=0;
++    int usedby_gv=0;
++    int resolved_used=0;
++
++    for(auto f:tar_funcs)
++    {       
++        string fun_name=f->getName().str();
++        reslove_function4sys(f);
++    }
++}
++
++bool try_resolve_static_ctl(GlobalVariable* g)
++{
++    bool ret=false;
++    Constant *gini=g->getInitializer();
++    if(ConstantAggregate *constaggr=dyn_cast<ConstantAggregate>(gini))
++    {
++        //errs()<<G->getName()<<" is a ConstantAggregate\n";  
++        if(ConstantArray *aggrarray=dyn_cast<ConstantArray>(constaggr))
++        {
++            //errs()<<G->getName()<<" is a ConstantArray\n";
++            int array_size=aggrarray->getNumOperands(); 
++            Value* first_mem=aggrarray->getOperand(0);            
++            if(ConstantStruct* construct=dyn_cast<ConstantStruct>(first_mem))
++            {
++                StructType* structtype=construct->getType();
++                //errs()<<"struct has "<<structtype->getNumElements()<<" members\n";
++                int struct_mem=structtype->getNumElements();
++                if(struct_mem!=9)
++                    return ret; 
++                //errs()<<"first mem is a struct\n";
++                Value* firsttop=construct->getOperand(0);
++                errs()<<*firsttop<<"\n";
++                string name=construct->getType()->getStructName().str();
++                //errs()<<"child struct type is "<<name<<"\n";
++                Type* first=firsttop->getType();
++                if(!first->isPointerTy())
++                {
++                    errs()<<"first should be a pointer\n";
++                    return ret;
++                }
++                Value* second=construct->getOperand(1);
++                Type* secondtype=second->getType();
++                if(!secondtype->isPointerTy())
++                {
++                    errs()<<"second should be a pointer\n";
++                    return ret;
++                }
++                Value* third=construct->getOperand(2);
++                Type* thirdtype=third->getType();
++                if(!thirdtype->isIntegerTy())
++                {
++                    errs()<<"third should be a integer\n";
++                    return ret;
++                }
++                Value* fifth=construct->getOperand(4);
++                Type* fifthtype=fifth->getType();
++                errs()<<*fifth<<"\n";
++                if(fifthtype->isPointerTy())
++                {
++                    fifthtype=fifthtype->getPointerElementType();
++                    if(fifthtype->isStructTy())
++                    {
++                        string name=fifthtype->getStructName().str();
++                        str_truncate_dot_number(name);
++                        //errs()<<"get struct type name "<<name<<"\n";
++                        if(name=="struct.ctl_table")
++                        {
++                            ret=true;
++                        }
++                    }
++                        
++                }
++                else{
++                    errs()<<"fifth should be a pointer\n";
++                }
++            } 
++        }
++    }
++    return ret;
++}
++
++//iterate ctl_table.proc_handler find CAP check
++void gatlin::identify_ctl(Module& module)
++{
++    int ctls=0;
++    int procs=0;
++    int pro_procs=0;
++    GlobalVariableSet tables;
++    for(GlobalVariable &gvi: module.globals())
++    {
++        GlobalVariable* G=&gvi;
++        if (G->isDeclaration())
++            continue;
++        assert(isa<Value>(G));
++
++        StringRef gvn = G->getName();
++        if (gvn.startswith("__kstrtab") || 
++                gvn.startswith("__tpstrtab") || 
++                gvn.startswith(".str") ||
++                gvn.startswith("llvm.") ||
++                gvn.startswith("__setup_str")||
++                gvn.startswith("__tracepoint_"))
++            continue; 
++        Constant *gini; 
++        if(G->hasInitializer())      
++            gini=G->getInitializer();
++        else
++            continue;
++        if(ConstantAggregate *constaggr=dyn_cast<ConstantAggregate>(gini))
++        {
++            //errs()<<" is a ConstantAggregate\n";               
++            if(ConstantArray *aggrarray=dyn_cast<ConstantArray>(constaggr))
++            {
++                //errs()<<"is a Array\n";
++                int array_size=aggrarray->getNumOperands(); 
++                Value* first_mem=aggrarray->getOperand(0);
++                if(StructType* st=dyn_cast<StructType>(first_mem->getType()))
++                {
++                    if(!st->hasName())
++                      continue;
++                    string type_name=st->getStructName().str();
++                    //errs()<<type_name<<"\n";
++                    str_truncate_dot_number(type_name);
++                    //errs()<<type_name<<"\n";
++                    if(type_name!="struct.ctl_table")
++                    {
++                        if(!try_resolve_static_ctl(G))
++                            continue;
++                    }
++                    tables.insert(G);
++                    for(int ai=0;ai<array_size;ai++)
++                    {
++                        ctls++;
++                        Value *sval=aggrarray->getOperand(ai);
++                        if(ConstantStruct *aggrstruct=dyn_cast<ConstantStruct>(sval))
++                        {
++                            Value* ptrval=aggrstruct->getOperand(5);
++                            if(Function* fun=dyn_cast<Function>(ptrval))
++                            {
++                                //errs()<<"in "<<G->getName()<<" proc_handler used "<<fun->getName()<<"\n";
++                                procs++;
++                                //spread func and find cap checker
++                                if(tar_wrappers.find(fun)!=tar_wrappers.end())
++                                {
++                                    pro_procs++;
++                                    errs()<<fun->getName()<<" is protected by cap \n";
++                                }
++                            }
++                            // errs()<<"proc_handler "<<*ptrval<<"\n";
++                        }
++                    }
++                }
++                /*
++                errs()<<"global var "<<G->getName()<<" is ctl_table[] type\n";
++                */
++            }
++        }
++        //struct ctl_table=
++        if(ConstantStruct *aggrstruct=dyn_cast<ConstantStruct>(gini))
++        {
++            if(StructType* st=dyn_cast<StructType>(G->getType()))
++            {
++                string type_name=st->getStructName().str();
++                str_truncate_dot_number(type_name);
++                if(type_name!="struct.ctl_table")
++                    continue;
++                tables.insert(G);
++                /*
++                errs()<<"global var "<<G->getName()<<" is type "<<type_name;
++                errs()<<*G<<"\n";*/
++                ctls++;
++                Value* ptrval=aggrstruct->getOperand(5);
++                if(Function* fun=dyn_cast<Function>(ptrval))
++                {
++                    //errs()<<"in "<<G->getName()<<"proc_handler used "<<fun->getName()<<"\n";
++                    procs++;
++                    //spread func and find cap checker
++                    if(tar_wrappers.find(fun)!=tar_wrappers.end())
++                    {
++                        pro_procs++;
++                        errs()<<fun->getName()<<" is protected by cap \n";
++                    }
++                }
++            }
++            
++            // errs()<<"proc_handler "<<*ptrval<<"\n";
++        }
++      
++    }
++    if(!tables.empty())
++        errs()<<"find "<<tables.size()<<" ctl_table gv\n";
++    for(auto g:tables)
++    {
++        Constant *gini; 
++        if(g->hasInitializer())      
++            gini=g->getInitializer();
++        else
++        {
++            errs()<<"gv did not have initializer\n";
++        }
++        // if(g->getName()=="addrconf_sysctl")
++        // {
++        //     errs()<<"find addrconf_sysctl\n";
++            
++        //     if(ConstantArray *aggrarray=dyn_cast<ConstantArray>(gini))
++        //     {
++        //         int array_size=aggrarray->getNumOperands();
++        //         errs()<<g->getName()<<" has "<<array_size<<" members\n"; 
++        //         //Value* first_mem=aggrarray->getOperand(0);
++                
++        //     }
++        // }
++                   
++    }
++    errs()<<"has "<<ctls<<" ctl_table type member "<<procs<<" has proc_handler,"<<pro_procs<<" is protected\n";
++}
++
++void gatlin::CollectWrappers()
++{
++  for(auto f:tar_funcs)
++   {
++       tar_wrappers.insert(f);
++       for (auto* u: f->users())
++        {
++            if(Instruction *I=dyn_cast<Instruction>(u))
++            {
++                Function *caller=I->getParent()->getParent();
++                tar_wrappers.insert(caller);
++
++            }
++        }
++   }
++    errs()<<"find tar_wrappers "<<tar_wrappers.size()<<"\n";
++}
++
+ /*
+  * process capability protected globals and functions
+  */
+@@ -2724,7 +4428,9 @@ void gatlin::process_cpgf(Module &module) {
+   errs() << "Pre-processing...\n";
+   STOP_WATCH_MON(WID_0, preprocess(module));
+   errs() << "Found " << syscall_list.size() << " syscalls\n";
+-
++  // find_function(module);
++  // errs()<<"mjz add end\n";
++  
+   errs() << "Process Gating Functions\n";
+   STOP_WATCH_START(WID_0);
+   if (knob_gating_type == "cap")
+@@ -2740,6 +4446,7 @@ void gatlin::process_cpgf(Module &module) {
+   dump_gating();
+ 
+   // pass 0
++  /*
+   errs() << "Collect Checkpoints\n";
+   STOP_WATCH_MON(WID_0, collect_chkps(module));
+   errs() << "Identify interesting struct\n";
+@@ -2748,16 +4455,26 @@ void gatlin::process_cpgf(Module &module) {
+   errs() << "Collecting Initialization Closure.\n";
+   STOP_WATCH_MON(WID_0, collect_kernel_init_functions(module));
+ 
++//
+   // statistics for function signature based approache
+   // STOP_WATCH_MON(WID_0, my_debug(module));
+   // exit (0);
+ 
+   errs() << "Identify Kernel Modules Interface\n";
+   STOP_WATCH_MON(WID_0, identify_kmi(module));
+-  dump_kmi();
++  //dump_kmi();
+   errs() << "dynamic KMI\n";
+   STOP_WATCH_MON(WID_0, identify_dynamic_kmi(module));
+-  dump_dkmi();
++  //dump_dkmi();*/
++
++  getfunparam();
++  //mjzadd
++  mjz_refine_tarfuncs();
++  mjz_prepare();
++  mjz_test(module);
++  mjz_systest(module);
++  // CollectWrappers();
++  identify_ctl(module);
+ 
+   errs() << "Populate indirect callsite using kernel module interface\n";
+   STOP_WATCH_MON(WID_0, populate_indcall_list_through_kmi(module));
+@@ -2800,6 +4517,7 @@ void gatlin::process_cpgf(Module &module) {
+   delete crit_syms;
+   delete kernel_api;
+   delete gating;
++  
+ }
+ 
+ bool gatlin::runOnModule(Module &module) {
+diff --git a/gatlin/gatlin.h b/gatlin/gatlin.h
+index 135674a..d78532b 100644
+--- a/gatlin/gatlin.h
++++ b/gatlin/gatlin.h
+@@ -86,6 +86,8 @@ private:
+   // capability checker
+   void process_cpgf(Module &module);
+ 
++//mjz add
++  void find_function(Module& module);
+   // dump call graph into .dot file
+   void dump_call_graph(Module &module);
+ 
+@@ -188,6 +190,29 @@ private:
+   void dump_dkmi();
+ 
+   void my_debug(Module &module);
++  //mjztest
++  void mjz_prepare();
++  void mjz_find(Module& module);
++  void mjz_test(Module& module);
++  void find_globalvar_uses(Value* f,ValueSet& visited,GlobalVariableSet& res,Function* func);
++  void optmize_findgv(Function* f);
++  string GetCapFromFun(Function* f);
++  void mjz_refine_tarfuncs();
++  void getfunparam();
++  string GetCapName(CallInst* ci);
++  void structdb_init();
++  string getTypeName(GlobalVariable* g);
++  Type* getTypeFrommi2m(GlobalVariable* g);
++  list<string> getTmpPathfromGV(Value* usedby,GlobalVariable*g);
++  void getPath2Base(Value* used,GlobalVariable* g,list<string>& paths,int depth);
++  Function* getLSMsecfun(string fname);
++  void identify_ctl(Module& module);
++  void mjz_systest(Module& module);
++  void reslove_function4sys(Function* f);
++  void CollectWrappers();
++
++
++
+ 
+ public:
+   static char ID;
+@@ -276,8 +301,19 @@ private:
+   FunctionSet kernel_init_functions;
+   FunctionSet non_kernel_init_functions;
+ 
++//mjzadd
++  Func2CapCheckFuncs funcs2funcalls;
++  FunctionSet tar_funcs;
++  ModuleInterfaceName2Position mi2p;
++  InterestingModuleInterfacesName minames;
++  ModuleName2PathName m2pn;
++  FunctionSet tar_wrappers;
++
++
+   // store all skipped critical functions here
+   FunctionSet skipped_functions;
++  
++
+   /*
+    * all critical functions and variables should be permission checked before
+    * use generate critical functions on-the-fly
+diff --git a/gatlin/internal.h b/gatlin/internal.h
+index d1472a3..aecd9c5 100644
+--- a/gatlin/internal.h
++++ b/gatlin/internal.h
+@@ -17,7 +17,8 @@ struct str2int {
+ #define BUILTIN_CAP_FUNC_LIST_SIZE 2
+ [[maybe_unused]] static const struct str2int _builtin_cap_functions[] = {
+     {"capable", 0}, {"ns_capable", 1}};
+-
++//mjzadd
++// {"netlink_capable",2}};
+ /*
+  * kernel start function
+  */
+diff --git a/gatlin/utility.cpp b/gatlin/utility.cpp
+index 51788c3..185771a 100644
+--- a/gatlin/utility.cpp
++++ b/gatlin/utility.cpp
+@@ -984,6 +984,19 @@ static Value *_get_value_from_composit(Value *cv, Indices &indices) {
+     goto end;
+   if (initializer->isZeroValue())
+     goto end;
++  if (const auto *UV = dyn_cast<UndefValue>(initializer)){
++    Type *Ty = UV->getType();
++    if (auto *AT = dyn_cast<ArrayType>(Ty)){
++    }
++    else if (auto *VT = dyn_cast<VectorType>(Ty)){
++    }
++    else if (auto *ST = dyn_cast<StructType>(Ty)){
++    }
++    else {
++      // no one match, goto end
++      goto end;
++    }
++  }
+   v = initializer->getAggregateElement(i);
+   assert(v != cv);
+   if (v == NULL)
+diff --git a/test/test.sh b/test/test.sh
+index f36224f..87ff59f 100755
+--- a/test/test.sh
++++ b/test/test.sh
+@@ -1,7 +1,7 @@
+ clang test.c -c -emit-llvm -o  test.bc -O0 -g
+ 
+ opt \
+-	-analyze -load=/home/t.zhang2/gatlin/build/gatlin/libgatlin.so \
++	-analyze -load=/home/share/syz/new-llvm/mjz-pex/pex-master/build/gatlin/libgatlin.so \
+ 	-gatlin -stats \
+     -gating=cap \
+     -ccfv=1 -ccvv=0 -cctv=0\
