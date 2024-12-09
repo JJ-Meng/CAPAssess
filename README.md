@@ -22,7 +22,7 @@ this step generates gcc.txt
 ## results 
 We reported identified problems to relvant partied and collect their responses. The results are shown in capassess_appendix.pdf.
 A quick overview of the metrics and assess results:
-[!image](metrics_results.png)
+![assess metrics and results](metrics_results.png)
 
 
   
