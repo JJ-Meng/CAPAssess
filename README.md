@@ -1,4 +1,4 @@
-# CAPAssess - A assess framework for Linux capabilities. 
+![image](https://github.com/user-attachments/assets/885c4744-3b4c-45be-9e11-38e35aede6ce)# CAPAssess - A assess framework for Linux capabilities. 
 CAPAsses provides three tools and 10 metrics to identify potential problems in capabilities's design, implementation, and configuration. Specifically, the 3 tools are:
 - Overlap Analyzer, quantifies capabilities based on kernel functions and detects overlaps in privilege definition. 
 - Conflict Analyzer, explores the relationship between capabilities and UGO.
@@ -23,6 +23,13 @@ this step generates gcc.txt
 We reported identified problems to relvant partied and collect their responses. The results are shown in capassess_appendix.pdf.
 A quick overview of the metrics and assess results:
 ![assess metrics and results](metrics_results.png)
+Some problems identified by CAPAssess and the process of solving them:
+
+ctrlaltdel: remove unnecessary uid check. (https://github.com/util-linux/util-linux/pull/2719)
+
+ping: an extra capability is needed in configuration. (https://github.com/iputils/iputils/issues/515)
+
+kernel patch: remove the overlap between CAP_SYS_ADMIN and CAP_SYSLOG. (https://git.kernel.org/pub/scm/linux/kernel/git/kees/linux.git/commit/?id=09ce61e27db8)
 
 
   
