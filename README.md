@@ -15,7 +15,7 @@ For Overlap Analyzer and Conflict Analyzer, LLVM and compiler with C++ support a
 this step generates gcc.txt
   4. Execute make_kernel.py in the directory of kernel source code.
 - Conflict Analyzer
-  The usage is similar to the PeX. Please check: https://github.com/lzto/pex
+  The usage is similar to the PeX. Please check: https://github.com/lzto/pex, commit e2855417d2e.
 - Capability Fuzzer
   Put the command you want fuzz in the file, one command per line, and run 
 ``python3 run_all_scripts.py target_commands``.
