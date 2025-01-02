@@ -1,4 +1,4 @@
-![image](https://github.com/user-attachments/assets/885c4744-3b4c-45be-9e11-38e35aede6ce)# CAPAssess - A assess framework for Linux capabilities. 
+# CAPAssess - A assess framework for Linux capabilities. 
 CAPAsses provides three tools and 10 metrics to identify potential problems in capabilities's design, implementation, and configuration. Specifically, the 3 tools are:
 - Overlap Analyzer, quantifies capabilities based on kernel functions and detects overlaps in privilege definition. 
 - Conflict Analyzer, explores the relationship between capabilities and UGO.
